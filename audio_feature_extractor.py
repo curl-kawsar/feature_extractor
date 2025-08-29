@@ -13,10 +13,12 @@ Features extracted:
 - Chroma STFT
 
 Output files:
-- mfcc.npy: shape (num_samples, 13, 300)
-- zcr.npy: shape (num_samples, 300)
-- rmse.npy: shape (num_samples, 300)
-- chroma.npy: shape (num_samples, 12, 300)
+- audio_features_combined.npz: contains all features in one file
+  - mfcc: shape (num_samples, 13, 300)
+  - zcr: shape (num_samples, 300)
+  - rmse: shape (num_samples, 300)
+  - chroma: shape (num_samples, 12, 300)
+  - filenames: list of processed audio filenames
 - audio_features.csv: statistical summaries of all features
 """
 
@@ -24,12 +26,24 @@ import os
 import glob
 import numpy as np
 import pandas as pd
-import librosa
 from typing import Tuple, List
 import warnings
+import sys
 
-# Suppress librosa warnings
+# Suppress warnings
 warnings.filterwarnings('ignore')
+
+# Try to import librosa with proper error handling
+try:
+    print("Loading librosa (this may take a moment on first run)...")
+    import librosa
+    print("Librosa loaded successfully!")
+except Exception as e:
+    print(f"Error importing librosa: {e}")
+    print("Please try installing/reinstalling librosa and its dependencies:")
+    print("pip uninstall librosa")
+    print("pip install librosa==0.10.1")
+    sys.exit(1)
 
 def pad_or_truncate(feature: np.ndarray, target_length: int = 300) -> np.ndarray:
     """
@@ -67,20 +81,34 @@ def extract_features(audio_path: str, sr: int = 22050) -> Tuple[np.ndarray, np.n
         Tuple of (mfcc, zcr, rmse, chroma) features
     """
     try:
-        # Load audio file
-        y, sr = librosa.load(audio_path, sr=sr)
+        # Load audio file with better error handling
+        print(f"  Loading audio: {os.path.basename(audio_path)}")
+        y, sr_actual = librosa.load(audio_path, sr=sr, duration=None)
+        
+        # Check if audio loaded successfully
+        if len(y) == 0:
+            print(f"  Warning: Empty audio file {audio_path}")
+            return None, None, None, None
+        
+        print(f"  Loaded {len(y)} samples at {sr_actual}Hz")
         
         # Extract MFCC features (13 coefficients)
-        mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+        print("  Extracting MFCC...")
+        mfcc = librosa.feature.mfcc(y=y, sr=sr_actual, n_mfcc=13, hop_length=512)
         
         # Extract Zero Crossing Rate
-        zcr = librosa.feature.zero_crossing_rate(y)[0]  # Remove extra dimension
+        print("  Extracting ZCR...")
+        zcr = librosa.feature.zero_crossing_rate(y, hop_length=512)[0]  # Remove extra dimension
         
         # Extract Root Mean Square Energy
-        rmse = librosa.feature.rms(y=y)[0]  # Remove extra dimension
+        print("  Extracting RMSE...")
+        rmse = librosa.feature.rms(y=y, hop_length=512)[0]  # Remove extra dimension
         
         # Extract Chroma STFT
-        chroma = librosa.feature.chroma_stft(y=y, sr=sr)
+        print("  Extracting Chroma...")
+        chroma = librosa.feature.chroma_stft(y=y, sr=sr_actual, hop_length=512)
+        
+        print(f"  Feature shapes before padding: MFCC:{mfcc.shape}, ZCR:{zcr.shape}, RMSE:{rmse.shape}, Chroma:{chroma.shape}")
         
         # Pad or truncate all features to 300 frames
         mfcc = pad_or_truncate(mfcc, 300)
@@ -88,10 +116,16 @@ def extract_features(audio_path: str, sr: int = 22050) -> Tuple[np.ndarray, np.n
         rmse = pad_or_truncate(rmse, 300)
         chroma = pad_or_truncate(chroma, 300)
         
+        print(f"  Feature shapes after padding: MFCC:{mfcc.shape}, ZCR:{zcr.shape}, RMSE:{rmse.shape}, Chroma:{chroma.shape}")
+        
         return mfcc, zcr, rmse, chroma
         
+    except KeyboardInterrupt:
+        print(f"\nProcessing interrupted by user.")
+        return None, None, None, None
     except Exception as e:
-        print(f"Error processing {audio_path}: {str(e)}")
+        print(f"  Error processing {audio_path}: {str(e)}")
+        print(f"  Error type: {type(e).__name__}")
         return None, None, None, None
 
 def compute_feature_statistics(features: np.ndarray) -> dict:
@@ -155,47 +189,58 @@ def process_audio_dataset(dataset_path: str = "audio_dataset/") -> None:
     csv_data = []
     
     # Process each audio file
-    for i, wav_file in enumerate(wav_files):
-        print(f"Processing {i+1}/{len(wav_files)}: {os.path.basename(wav_file)}")
-        
-        mfcc, zcr, rmse, chroma = extract_features(wav_file)
-        
-        if mfcc is not None:
-            all_mfcc.append(mfcc)
-            all_zcr.append(zcr)
-            all_rmse.append(rmse)
-            all_chroma.append(chroma)
+    successful_files = []
+    try:
+        for i, wav_file in enumerate(wav_files):
+            print(f"\nProcessing {i+1}/{len(wav_files)}: {os.path.basename(wav_file)}")
             
-            # Compute statistics for CSV
-            mfcc_stats = compute_feature_statistics(mfcc)
-            zcr_stats = compute_feature_statistics(zcr)
-            rmse_stats = compute_feature_statistics(rmse)
-            chroma_stats = compute_feature_statistics(chroma)
+            mfcc, zcr, rmse, chroma = extract_features(wav_file)
             
-            # Create row for CSV
-            row = {'filename': os.path.basename(wav_file)}
-            
-            # Add ZCR statistics (1D feature)
-            for stat_name, stat_value in zcr_stats.items():
-                row[f'zcr_{stat_name}'] = stat_value
-            
-            # Add RMSE statistics (1D feature)
-            for stat_name, stat_value in rmse_stats.items():
-                row[f'rmse_{stat_name}'] = stat_value
-            
-            # Add MFCC statistics (2D feature - 13 coefficients)
-            for stat_name, stat_values in mfcc_stats.items():
-                for i, stat_value in enumerate(stat_values):
-                    row[f'mfcc_{i}_{stat_name}'] = stat_value
-            
-            # Add Chroma statistics (2D feature - 12 coefficients)
-            for stat_name, stat_values in chroma_stats.items():
-                for i, stat_value in enumerate(stat_values):
-                    row[f'chroma_{i}_{stat_name}'] = stat_value
-            
-            csv_data.append(row)
-        else:
-            print(f"Skipping {wav_file} due to processing error")
+            if mfcc is not None:
+                all_mfcc.append(mfcc)
+                all_zcr.append(zcr)
+                all_rmse.append(rmse)
+                all_chroma.append(chroma)
+                successful_files.append(wav_file)
+                
+                # Compute statistics for CSV
+                print("  Computing statistics...")
+                mfcc_stats = compute_feature_statistics(mfcc)
+                zcr_stats = compute_feature_statistics(zcr)
+                rmse_stats = compute_feature_statistics(rmse)
+                chroma_stats = compute_feature_statistics(chroma)
+                
+                # Create row for CSV
+                row = {'filename': os.path.basename(wav_file)}
+                
+                # Add ZCR statistics (1D feature)
+                for stat_name, stat_value in zcr_stats.items():
+                    row[f'zcr_{stat_name}'] = stat_value
+                
+                # Add RMSE statistics (1D feature)
+                for stat_name, stat_value in rmse_stats.items():
+                    row[f'rmse_{stat_name}'] = stat_value
+                
+                # Add MFCC statistics (2D feature - 13 coefficients)
+                for stat_name, stat_values in mfcc_stats.items():
+                    for coef_idx, stat_value in enumerate(stat_values):
+                        row[f'mfcc_{coef_idx}_{stat_name}'] = stat_value
+                
+                # Add Chroma statistics (2D feature - 12 coefficients)
+                for stat_name, stat_values in chroma_stats.items():
+                    for coef_idx, stat_value in enumerate(stat_values):
+                        row[f'chroma_{coef_idx}_{stat_name}'] = stat_value
+                
+                csv_data.append(row)
+                print(f"  Successfully processed {os.path.basename(wav_file)}")
+            else:
+                print(f"  Skipping {wav_file} due to processing error")
+    
+    except KeyboardInterrupt:
+        print(f"\n\nProcessing interrupted by user. Processed {len(all_mfcc)}/{len(wav_files)} files.")
+        if len(all_mfcc) == 0:
+            print("No files were processed successfully. Exiting.")
+            return
     
     if not all_mfcc:
         print("No valid features extracted. Please check your audio files.")
@@ -214,12 +259,18 @@ def process_audio_dataset(dataset_path: str = "audio_dataset/") -> None:
     print(f"RMSE shape: {rmse_array.shape}")
     print(f"Chroma shape: {chroma_array.shape}")
     
-    # Save arrays to disk
-    print("\nSaving feature arrays...")
-    np.save('mfcc.npy', mfcc_array)
-    np.save('zcr.npy', zcr_array)
-    np.save('rmse.npy', rmse_array)
-    np.save('chroma.npy', chroma_array)
+    # Combine all features into a single dictionary
+    combined_features = {
+        'mfcc': mfcc_array,
+        'zcr': zcr_array,
+        'rmse': rmse_array,
+        'chroma': chroma_array,
+        'filenames': [os.path.basename(f) for f in successful_files]
+    }
+    
+    # Save combined features to a single file
+    print("\nSaving combined feature file...")
+    np.savez('audio_features_combined.npz', **combined_features)
     
     # Save CSV file with feature statistics
     if csv_data:
@@ -229,10 +280,7 @@ def process_audio_dataset(dataset_path: str = "audio_dataset/") -> None:
     
     print("Feature extraction completed successfully!")
     print("Saved files:")
-    print("- mfcc.npy")
-    print("- zcr.npy")
-    print("- rmse.npy")
-    print("- chroma.npy")
+    print("- audio_features_combined.npz (contains all 4 feature types)")
     print("- audio_features.csv")
 
 def main():
